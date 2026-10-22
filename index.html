@@ -132,6 +132,21 @@
   .crumb{color:var(--dim);font-size:13.5px;margin-bottom:14px}
   .crumb a:hover{color:var(--acc2)}
   @media(max-width:720px){ nav.main{display:none} .grid{grid-template-columns:repeat(auto-fill,minmax(112px,1fr))} .row-scroll{grid-auto-columns:124px} }
+
+  /* anime (miruro + anichin) */
+  .frame16x9{position:relative;aspect-ratio:16/9;background:#000;border-radius:14px;overflow:hidden;border:1px solid var(--line)}
+  .frame16x9 iframe,.frame16x9 video{position:absolute;inset:0;width:100%;height:100%;border:0}
+  .frame16x9 video{aspect-ratio:auto}
+  .srvbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:12px 0}
+  .srvbar .lab{color:var(--dim);font-size:12.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em}
+  .ptabs{display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap}
+  .ptabs a{padding:10px 20px;border-radius:999px;border:1px solid var(--line);background:var(--panel);font-weight:700;color:var(--dim)}
+  .ptabs a.on{background:linear-gradient(90deg,var(--acc),#6246ea);color:#fff;border-color:transparent}
+  .asearch{display:flex;gap:10px;margin-bottom:20px}
+  .asearch input{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:11px 18px;color:var(--fg);font-size:14px;outline:none}
+  .asearch input:focus{border-color:var(--acc)}
+  select.fsel{background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:9px;padding:8px 10px;font-size:13.5px}
+  .epthumb{display:block;width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;margin-bottom:6px;background:#000}
 </style>
 </head>
 <body>
@@ -143,6 +158,7 @@
       <a href="#/" data-nav="home">Beranda</a>
       <a href="#/browse/1" data-nav="g1">Film</a>
       <a href="#/browse/2" data-nav="g2">Serial TV</a>
+      <a href="#/anime/m" data-nav="anime">Anime</a>
     </nav>
     <div class="searchbox">
       <span class="ic">🔍</span>
@@ -872,6 +888,7 @@ function setNav(which) {
 }
 function router() {
   stopWatch();
+  if (window.__animeStop) window.__animeStop();
   const hash = location.hash.replace(/^#/, '') || '/';
   const parts = hash.split('/').filter(Boolean);
   window.scrollTo(0, 0);
@@ -879,6 +896,7 @@ function router() {
   if (parts[0] === 'browse') return viewBrowse(parseInt(parts[1] || '1', 10) || 1);
   if (parts[0] === 'title') return viewTitle(parts[1], parts[2] ?? '1');
   if (parts[0] === 'watch') return viewWatch(parts[1], parts[2] ?? '1', parts[3]);
+  if (parts[0] === 'anime') return window.__animeRoute ? window.__animeRoute(parts.slice(1)) : viewHome();
   if (parts[0] === 'search') return viewSearch(decodeURIComponent(parts.slice(1).join('/') || ''));
   return viewHome();
 }
@@ -909,6 +927,723 @@ document.addEventListener('keydown', (e) => { if (e.key === '/' && document.acti
   router();
   harvestIndex();
 })();
+</script>
+<script>
+/* ============================================================
+   KharuiStream — modul Anime (Miruro + Anichin/Donghua)
+   Kedua sumber tidak membuka CORS ke browser, jadi semua data
+   diambil lewat relay allorigins (/raw, byte-faithful, ACAO
+   memantulkan origin situs). Pemutaran memakai URL embed resmi
+   dari payload masing-masing sumber (iframe) — stream HLS
+   Miruro tidak bisa diputar langsung dari browser karena CDN-nya
+   memblokir Origin di luar daftar izinya (sudah diverifikasi).
+   ============================================================ */
+(() => {
+'use strict';
+const CUSTOM_RELAY = 'https://kharui-relay.haikal-fikrian.workers.dev';   // URL relay milik sendiri (Cloudflare Worker) bila sudah dipasang; kosong = relay publik
+const relayUrls = (u) => {
+  const list = [];
+  if (CUSTOM_RELAY) list.push(CUSTOM_RELAY.replace(/\/$/, '') + '/?u=' + encodeURIComponent(u));
+  list.push('https://api.allorigins.win/raw?url=' + encodeURIComponent(u));
+  return list;
+};
+async function aoFetch(url, binary = false) {
+  let lastErr = null;
+  for (const relayed of relayUrls(url)) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const r = await fetch(relayed);
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return binary ? await r.arrayBuffer() : await r.text();
+      } catch (e) {
+        lastErr = e;
+        if (attempt === 0) await new Promise((res) => setTimeout(res, 900));
+      }
+    }
+  }
+  throw lastErr || new Error('relay gagal');
+}
+const slugify = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+const stripHtml = (s) => String(s || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+function ptabsHTML(active, q, ph) {
+  return `<div class="ptabs">
+      <a href="#/anime/m" class="${active === 'm' ? 'on' : ''}">🎌 Miruro — Anime</a>
+      <a href="#/anime/a" class="${active === 'a' ? 'on' : ''}">🐉 Anichin — Donghua</a>
+    </div>
+    <form class="asearch" id="aSearchForm">
+      <input id="aSearchInput" type="search" placeholder="${esc(ph)}" value="${esc(q || '')}" autocomplete="off">
+      <button class="btn sm" type="submit">Cari</button>
+    </form>`;
+}
+function bindASearch(active) {
+  const f = $('#aSearchForm');
+  if (f) f.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const q = $('#aSearchInput').value.trim();
+    if (q) location.hash = `#/anime/${active}/search/${encodeURIComponent(q)}`;
+  });
+}
+const animeErr = (msg) => `<div class="empty"><b>Gagal memuat</b>${esc(msg || 'Relay data sedang bermasalah. Coba muat ulang halaman ini sebentar lagi.')}</div>`;
+
+/* ================= MIRURO ================= */
+const MIR_BASE = 'https://www.miruro.cx';
+const MIR_KEY = new TextEncoder().encode('miruro/catalog');
+async function mirApi(path) {
+  const buf = await aoFetch(MIR_BASE + path, true);
+  let bytes = new Uint8Array(buf);
+  if (!(bytes[0] === 0x1f && bytes[1] === 0x8b)) {
+    const out = new Uint8Array(bytes.length);
+    for (let i = 0; i < bytes.length; i++) out[i] = bytes[i] ^ MIR_KEY[i % MIR_KEY.length];
+    bytes = out;
+  }
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+  const text = await new Response(stream).text();
+  return JSON.parse(text);
+}
+const MIR_GENRES = ['Action', 'Adventure', 'Comedy', 'Drama', 'Ecchi', 'Fantasy', 'Horror', 'Mahou Shoujo', 'Mecha', 'Music', 'Mystery', 'Psychological', 'Romance', 'Sci-Fi', 'Slice of Life', 'Sports', 'Supernatural', 'Thriller'];
+const MIR_FORMATS = [['', 'Semua Format'], ['TV', 'TV'], ['MOVIE', 'Movie'], ['OVA', 'OVA'], ['ONA', 'ONA'], ['TV_SHORT', 'TV Short'], ['SPECIAL', 'Special']];
+const MIR_STATUS = [['', 'Semua Status'], ['RELEASING', 'Sedang Tayang'], ['FINISHED', 'Tamat'], ['NOT_YET_RELEASED', 'Segera Tayang'], ['CANCELLED', 'Dibatalkan']];
+const MIR_SORTS = [['-popularity', 'Paling Populer'], ['-score', 'Skor Tertinggi'], ['-season_year', 'Terbaru'], ['-episode_count', 'Episode Terbanyak'], ['title', 'Judul A–Z']];
+const mirTitle = (a) => (a && a.title) ? (a.title.english || a.title.romaji || a.title.native || '') : '';
+function mirCardHTML(a) {
+  const score = a.average_score ? (a.average_score / 10).toFixed(1) : '';
+  const meta = [a.format, a.season_year].filter(Boolean).join(' · ');
+  return `<a class="card" href="#/anime/m/title/${esc(a.id)}">
+    <div class="poster">
+      ${a.cover_url ? `<img loading="lazy" referrerpolicy="no-referrer" src="${esc(a.cover_url)}" alt="${esc(mirTitle(a))}">` : ''}
+      ${score ? `<span class="score">★ ${score}</span>` : ''}
+      ${a.episode_count ? `<span class="eps">${a.episode_count} Episode</span>` : ''}
+    </div>
+    <div class="name">${esc(mirTitle(a))}</div>
+    <div class="meta">${esc(meta || 'Anime')}</div>
+  </a>`;
+}
+async function viewMiruroHome() {
+  setNav('anime');
+  document.title = 'Anime (Miruro) — KharuiStream';
+  app.innerHTML = ptabsHTML('m', '', 'Cari anime di Miruro… (mis. Naruto, One Piece)')
+    + `<div class="sec-head"><h2>🔥 Trending — Sedang Tayang</h2><a href="#/anime/m/browse">Jelajahi katalog →</a></div><div class="row-scroll" id="mirTrend">${skeletonCards(6)}</div>`
+    + `<div class="sec-head"><h2>⭐ Paling Populer</h2></div><div class="row-scroll" id="mirPop">${skeletonCards(6)}</div>`
+    + `<div class="sec-head"><h2>🎬 Movie Anime Terbaik</h2></div><div class="row-scroll" id="mirMov">${skeletonCards(6)}</div>`
+    + `<div class="sec-head"><h2>🗓️ Segera Tayang</h2></div><div class="row-scroll" id="mirSoon">${skeletonCards(6)}</div>`;
+  bindASearch('m');
+  const fill = async (slot, path) => {
+    const el = $(slot); if (!el) return;
+    try {
+      const d = await mirApi(path);
+      const items = d.data || [];
+      el.innerHTML = items.length ? items.map(mirCardHTML).join('') : '<div class="empty" style="grid-column:1/-1">Tidak ada data.</div>';
+    } catch (e) { el.innerHTML = '<div class="empty" style="grid-column:1/-1">Gagal memuat rail ini.</div>'; }
+  };
+  fill('#mirTrend', '/api/v1/anime/trending?limit=12&status=RELEASING');
+  fill('#mirPop', '/api/v1/anime?limit=18&sort=-popularity');
+  fill('#mirMov', '/api/v1/anime?format=MOVIE&sort=-score&limit=15');
+  fill('#mirSoon', '/api/v1/anime?status=NOT_YET_RELEASED&sort=-popularity&limit=12');
+}
+
+/* ---- Miruro: jelajah + cari ---- */
+const mirBrowse = { genre: '', format: '', status: '', year: '', sort: '-popularity', cursor: null, loading: false, done: false };
+function mirBrowseParams(withCursor) {
+  const p = new URLSearchParams();
+  const filtered = mirBrowse.genre || mirBrowse.format || mirBrowse.status || mirBrowse.year;
+  p.set('limit', filtered ? '15' : '18');
+  p.set('sort', mirBrowse.sort);
+  if (mirBrowse.genre) p.set('genre_all', mirBrowse.genre);
+  if (mirBrowse.format) p.set('format', mirBrowse.format);
+  if (mirBrowse.status) p.set('status', mirBrowse.status);
+  if (mirBrowse.year) p.set('season_year', mirBrowse.year);
+  if (withCursor && mirBrowse.cursor) p.set('cursor', mirBrowse.cursor);
+  return '/api/v1/anime?' + p.toString();
+}
+async function viewMiruroBrowse() {
+  setNav('anime');
+  document.title = 'Jelajahi Anime — KharuiStream';
+  mirBrowse.genre = ''; mirBrowse.format = ''; mirBrowse.status = ''; mirBrowse.year = ''; mirBrowse.sort = '-popularity'; mirBrowse.cursor = null; mirBrowse.done = false;
+  const years = ['', ...Array.from({ length: 37 }, (_, i) => String(2026 - i))];
+  app.innerHTML = ptabsHTML('m', '', 'Cari anime di Miruro…')
+    + `<div class="filters">
+        <div class="frow"><span class="lab">Genre</span>
+          <button class="chip on" data-g="">Semua</button>
+          ${MIR_GENRES.map((g) => `<button class="chip" data-g="${esc(g)}">${esc(g)}</button>`).join('')}
+        </div>
+        <div class="frow"><span class="lab">Format</span>
+          <select class="fsel" id="mirFormat">${MIR_FORMATS.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select>
+          <span class="lab" style="width:auto;margin-left:10px">Status</span>
+          <select class="fsel" id="mirStatus">${MIR_STATUS.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select>
+          <span class="lab" style="width:auto;margin-left:10px">Tahun</span>
+          <select class="fsel" id="mirYear">${years.map((y) => `<option value="${y}">${y || 'Semua'}</option>`).join('')}</select>
+          <span class="lab" style="width:auto;margin-left:10px">Urutkan</span>
+          <select class="fsel" id="mirSort">${MIR_SORTS.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select>
+        </div>
+      </div>
+      <div class="grid" id="mirGrid">${skeletonCards(12)}</div>
+      <div style="text-align:center;padding:24px"><button class="btn ghost" id="mirMore">Muat Lebih Banyak</button></div>`;
+  bindASearch('m');
+  app.querySelectorAll('[data-g]').forEach((ch) => ch.addEventListener('click', () => {
+    mirBrowse.genre = ch.dataset.g;
+    app.querySelectorAll('[data-g]').forEach((c) => c.classList.toggle('on', c === ch));
+    mirResetGrid();
+  }));
+  const onSel = (id, key) => { const el = $(id); if (el) el.addEventListener('change', () => { mirBrowse[key] = el.value; mirResetGrid(); }); };
+  onSel('#mirFormat', 'format'); onSel('#mirStatus', 'status'); onSel('#mirYear', 'year'); onSel('#mirSort', 'sort');
+  $('#mirMore').addEventListener('click', () => mirLoadMore(false));
+  mirLoadMore(true);
+}
+function mirResetGrid() {
+  mirBrowse.cursor = null; mirBrowse.done = false;
+  const g = $('#mirGrid'); if (g) g.innerHTML = skeletonCards(12);
+  mirLoadMore(true);
+}
+async function mirLoadMore(first) {
+  if (mirBrowse.loading || mirBrowse.done) return;
+  mirBrowse.loading = true;
+  const btn = $('#mirMore'); if (btn) btn.textContent = 'Memuat…';
+  try {
+    const d = await mirApi(mirBrowseParams(!first));
+    const items = d.data || [];
+    const grid = $('#mirGrid');
+    if (grid) {
+      if (first) grid.innerHTML = '';
+      if (!items.length && first) grid.innerHTML = '<div class="empty" style="grid-column:1/-1"><b>Tidak ada anime</b>Coba ubah filternya.</div>';
+      else grid.insertAdjacentHTML('beforeend', items.map(mirCardHTML).join(''));
+    }
+    mirBrowse.cursor = d.next_cursor || null;
+    mirBrowse.done = !d.has_more || !items.length;
+  } catch (e) {
+    if (first) { const grid = $('#mirGrid'); if (grid) grid.innerHTML = animeErr(); }
+    else toast('Gagal memuat — coba lagi');
+  }
+  mirBrowse.loading = false;
+  if (btn) { btn.textContent = mirBrowse.done ? '— Sudah semua —' : 'Muat Lebih Banyak'; btn.disabled = mirBrowse.done; }
+}
+async function viewMiruroSearch(q) {
+  setNav('anime');
+  document.title = `Cari "${q}" (Miruro) — KharuiStream`;
+  app.innerHTML = ptabsHTML('m', q, 'Cari anime di Miruro…')
+    + `<div class="sec-head"><h2>Hasil Miruro untuk “${esc(q)}”</h2><a href="#/anime/m/browse">Jelajahi katalog →</a></div>
+       <div class="grid" id="mirGrid">${skeletonCards(10)}</div>`;
+  bindASearch('m');
+  try {
+    const d = await mirApi('/api/v1/anime?q=' + encodeURIComponent(q) + '&limit=15&sort=-popularity');
+    const items = d.data || [];
+    $('#mirGrid').innerHTML = items.length ? items.map(mirCardHTML).join('')
+      : '<div class="empty" style="grid-column:1/-1"><b>Tidak ditemukan</b>Coba judul bahasa Inggris / romaji-nya.</div>';
+  } catch (e) { $('#mirGrid').innerHTML = animeErr(); }
+}
+
+/* ---- Miruro: detail ---- */
+const mirCache = new Map();   // id -> {detail, episodes}
+async function mirLoadTitle(id) {
+  if (mirCache.has(id)) return mirCache.get(id);
+  const [detail, epsRes] = await Promise.all([
+    mirApi('/api/v1/anime/' + id),
+    mirApi('/api/v1/anime/' + id + '/episodes?limit=10000').catch(() => ({ data: [] })),
+  ]);
+  const pack = { detail, episodes: (epsRes.data || []).slice().sort((a, b) => (a.episode_number || 0) - (b.episode_number || 0)) };
+  mirCache.set(id, pack);
+  return pack;
+}
+function mirEpRanges(eps) {
+  if (eps.length <= 120) return [[0, eps.length]];
+  const out = [];
+  for (let i = 0; i < eps.length; i += 100) out.push([i, Math.min(i + 100, eps.length)]);
+  return out;
+}
+function mirEpGridHTML(id, eps, rangeIdx) {
+  const ranges = mirEpRanges(eps);
+  const [s, e] = ranges[Math.min(rangeIdx, ranges.length - 1)];
+  const slice = eps.slice(s, e);
+  return `${ranges.length > 1 ? `<div class="srvbar"><span class="lab">Rentang</span>${ranges.map(([a, b], i) => `<button class="chip ${i === rangeIdx ? 'on' : ''}" data-range="${i}">${eps[a].episode_number}–${eps[b - 1].episode_number}</button>`).join('')}</div>` : ''}
+  <div class="eps-grid">${slice.map((ep) => `<a href="#/anime/m/watch/${esc(id)}/${ep.episode_number}">Eps ${ep.episode_number}<small>${esc(ep.title || '')}</small></a>`).join('')}</div>`;
+}
+async function viewMiruroTitle(id) {
+  setNav('anime');
+  document.title = 'Memuat anime… — KharuiStream';
+  app.innerHTML = `<div class="skl" style="height:380px"></div>`;
+  let pack;
+  try { pack = await mirLoadTitle(id); } catch (e) { app.innerHTML = animeErr('Detail anime gagal dimuat.'); return; }
+  const d = pack.detail, eps = pack.episodes;
+  document.title = `${mirTitle(d)} — KharuiStream`;
+  const score = d.average_score ? (d.average_score / 10).toFixed(1) : '';
+  const statusID = { FINISHED: 'Tamat', RELEASING: 'Sedang Tayang', NOT_YET_RELEASED: 'Segera Tayang', CANCELLED: 'Dibatalkan', HIATUS: 'Hiatus' }[d.status] || d.status || '';
+  const studios = (d.studios || []).filter((s) => s.is_animation_studio || s.is_main).map((s) => s.name).slice(0, 3);
+  app.innerHTML = `
+    <div class="crumb"><a href="#/anime/m">Anime</a> › <a href="#/anime/m/browse">Miruro</a> › ${esc(mirTitle(d))}</div>
+    <section class="detail-hero">
+      ${d.banner_url || d.background_url ? `<img class="bg" referrerpolicy="no-referrer" src="${esc(d.banner_url || d.background_url)}" alt="">` : ''}
+      <div class="shade"></div>
+      <div class="detail-in">
+        <div class="poster2"><img referrerpolicy="no-referrer" src="${esc(d.cover_url || '')}" alt="${esc(mirTitle(d))}"></div>
+        <div class="info">
+          <h1>${esc(mirTitle(d))}</h1>
+          ${d.title && d.title.romaji && d.title.english && d.title.romaji !== d.title.english ? `<div class="en">${esc(d.title.romaji)}</div>` : ''}
+          <div class="chips">
+            ${score ? `<span class="mchip gold">★ ${score}</span>` : ''}
+            ${d.format ? `<span class="mchip">${esc(d.format)}</span>` : ''}
+            ${statusID ? `<span class="mchip">${esc(statusID)}</span>` : ''}
+            ${d.season_year ? `<span class="mchip">${esc(d.season || '')} ${d.season_year}</span>` : ''}
+            ${d.episode_count ? `<span class="mchip">${d.episode_count} Episode</span>` : ''}
+            ${studios.map((s) => `<span class="mchip">${esc(s)}</span>`).join('')}
+            ${(d.genres || []).map((g) => `<span class="mchip">${esc(g)}</span>`).join('')}
+          </div>
+          <p class="synopsis">${esc(stripHtml(d.description) || 'Belum ada sinopsis.')}</p>
+          ${eps.length ? `<a class="btn" href="#/anime/m/watch/${esc(d.id)}/${eps[0].episode_number}">▶ Putar Episode ${eps[0].episode_number}</a>` : '<div class="err-box">Episode belum tersedia di Miruro.</div>'}
+          ${d.trailer_youtube_id ? `<a class="btn ghost" style="margin-left:8px" target="_blank" rel="noopener" href="https://www.youtube.com/watch?v=${esc(d.trailer_youtube_id)}">🎞️ Trailer</a>` : ''}
+        </div>
+      </div>
+    </section>
+    ${eps.length ? `<div class="sec-head"><h2>Daftar Episode (${eps.length})</h2></div><div id="mirEpSlot">${mirEpGridHTML(d.id, eps, 0)}</div>` : ''}
+    <div id="mirShowSlot"></div>
+    <div id="mirRecSlot"></div>`;
+  const bindRanges = () => {
+    app.querySelectorAll('[data-range]').forEach((b) => b.addEventListener('click', () => {
+      const slot = $('#mirEpSlot'); if (slot) { slot.innerHTML = mirEpGridHTML(d.id, eps, +b.dataset.range); bindRanges(); }
+    }));
+  };
+  bindRanges();
+  mirApi('/api/v1/anime/' + id + '/show').then((sh) => {
+    const slot = $('#mirShowSlot'); if (!slot) return;
+    const order = sh.order_release || [];
+    const byId = new Map((sh.data || []).map((a) => [a.id, a]));
+    const cards = order.map((x) => byId.get(x)).filter((a) => a && a.id !== id);
+    if (cards.length) slot.innerHTML = `<div class="sec-head"><h2>🔗 Serial Terkait (Urutan Rilis)</h2></div><div class="row-scroll">${cards.map(mirCardHTML).join('')}</div>`;
+  }).catch(() => {});
+  mirApi('/api/v1/anime/' + id + '/recommendations').then((rc) => {
+    const slot = $('#mirRecSlot'); if (!slot) return;
+    const cards = (rc.data || []).map((r) => r.anime).filter((a) => a && a.id !== id).slice(0, 18);
+    if (cards.length) slot.innerHTML = `<div class="sec-head"><h2>💡 Rekomendasi Serupa</h2></div><div class="row-scroll">${cards.map(mirCardHTML).join('')}</div>`;
+  }).catch(() => {});
+}
+
+/* ---- Miruro: tonton (embed resmi dari payload play) ---- */
+const MIR_PROVIDER_ORDER = ['icarus', 'anikoto', 'kickassanime', 'animepahe', 'animegg', 'aniwaves'];
+const MIR_EMBED_DENY = ['kwik.cx'];
+const mirHlsProxy = (u, o, r) => CUSTOM_RELAY.replace(/\/$/, '') + '/hls?u=' + encodeURIComponent(u) + '&o=' + encodeURIComponent(o || '') + '&r=' + encodeURIComponent(r || '');
+const mirFileProxy = (u, o) => CUSTOM_RELAY.replace(/\/$/, '') + '/?u=' + encodeURIComponent(u) + (o ? '&o=' + encodeURIComponent(o) : '');
+function mirCandidates(play, track) {
+  const tr = (play.tracks || []).find((t) => t.track === track) || (play.tracks || [])[0];
+  if (!tr) return [];
+  const provs = (tr.providers || []).slice().sort((a, b) => {
+    const ia = MIR_PROVIDER_ORDER.indexOf(a.provider), ib = MIR_PROVIDER_ORDER.indexOf(b.provider);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+  });
+  const out = [], seen = new Set();
+  const push = (c) => { if (c.url && !seen.has(c.url)) { seen.add(c.url); out.push(c); } };
+  for (const pv of provs) {
+    for (const sv of pv.servers || []) {
+      const hostOf = (u) => { try { return new URL(u).hostname; } catch (e) { return ''; } };
+      const hdrs = sv.headers || {};
+      if (CUSTOM_RELAY) {
+        for (const st of sv.streams || []) {
+          if (st.url && st.format === 'hls')
+            push({ type: 'hls', url: mirHlsProxy(st.url, hdrs.Origin, hdrs.Referer), label: `${pv.provider} · ${sv.server || 'HLS'}`, subs: pv.subtitles || [], origin: hdrs.Origin || '' });
+        }
+      }
+      const sEmbed = (sv.embed || {}).url;
+      if (sEmbed && !MIR_EMBED_DENY.includes(hostOf(sEmbed)))
+        push({ type: 'embed', url: sEmbed, label: `${pv.provider} · ${sv.server || 'embed'}` });
+      for (const st of sv.streams || []) {
+        const eUrl = (st.embed || {}).url;
+        if (eUrl && !MIR_EMBED_DENY.includes(hostOf(eUrl)))
+          push({ type: 'embed', url: eUrl, label: `${pv.provider} · ${sv.server || 'embed'}` });
+        if (st.url && st.format === 'mp4')
+          push({ type: 'video', url: st.url, label: `${pv.provider} · MP4 ${st.quality || ''}`.trim() });
+      }
+    }
+  }
+  return out;
+}
+let mirWatch = null;
+async function viewMiruroWatch(id, epNum) {
+  setNav('anime');
+  document.title = 'Memuat episode… — KharuiStream';
+  app.innerHTML = `<div class="skl" style="height:420px"></div>`;
+  let pack, play;
+  try {
+    pack = await mirLoadTitle(id);
+    play = await mirApi(`/api/v1/anime/${id}/episodes/${epNum}/play`);
+  } catch (e) { app.innerHTML = animeErr('Data putar gagal dimuat dari Miruro.'); return; }
+  const d = pack.detail, eps = pack.episodes;
+  const epMeta = eps.find((e) => e.episode_number === epNum) || { episode_number: epNum, title: '' };
+  const idx = eps.findIndex((e) => e.episode_number === epNum);
+  const prev = idx > 0 ? eps[idx - 1] : null, next = idx >= 0 && idx < eps.length - 1 ? eps[idx + 1] : null;
+  const tracks = (play.tracks || []).map((t) => t.track);
+  mirWatch = { id, epNum, play, track: tracks[0] || 'sub', cand: [], sel: 0 };
+  for (const t of ['ssub', 'sub', 'dub', ...tracks]) {
+    if (!tracks.includes(t)) continue;
+    const c = mirCandidates(play, t);
+    if (c.length) { mirWatch.track = t; mirWatch.cand = c; break; }
+  }
+  if (!mirWatch.cand.length && tracks.length) { mirWatch.track = tracks.includes('sub') ? 'sub' : tracks[0]; mirWatch.cand = mirCandidates(play, mirWatch.track); }
+  document.title = `${mirTitle(d)} — Episode ${epNum} — KharuiStream`;
+  app.innerHTML = `
+    <div class="crumb"><a href="#/anime/m">Anime</a> › <a href="#/anime/m/title/${esc(id)}">${esc(mirTitle(d))}</a> › Episode ${epNum}</div>
+    <div class="watch-wrap">
+      <div>
+        <div id="mirPlayer"></div>
+        <div id="mirSrvSlot"></div>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:14px">
+          <h2 style="margin:0;font-size:20px">${esc(mirTitle(d))} — Episode ${epNum}</h2>
+        </div>
+        ${epMeta.title ? `<p style="color:var(--dim);margin:6px 0 0">“${esc(epMeta.title)}”</p>` : ''}
+        <div class="p-controls">
+          ${tracks.length > 1 ? `<label for="mirTrack">Audio</label><select id="mirTrack">${tracks.map((t) => `<option value="${t}" ${t === mirWatch.track ? 'selected' : ''}>${t === 'dub' ? 'Dub (Inggris)' : t === 'ssub' ? 'Sub (Softsub)' : 'Sub'}</option>`).join('')}</select>` : ''}
+          ${prev ? `<a class="btn ghost sm" href="#/anime/m/watch/${esc(id)}/${prev.episode_number}">⏮ Eps ${prev.episode_number}</a>` : ''}
+          ${next ? `<a class="btn ghost sm" href="#/anime/m/watch/${esc(id)}/${next.episode_number}">Eps ${next.episode_number} ⏭</a>` : ''}
+          <a class="btn ghost sm" target="_blank" rel="noopener" href="https://www.miruro.cx/watch/${esc(id)}/${slugify(d.title ? (d.title.romaji || d.title.english) : '')}?ep=${epNum}">↗ Buka di Miruro</a>
+        </div>
+        <p style="color:var(--dim);max-width:80ch">Video diputar lewat pemutar embed resmi dari server sumber (Miruro). Subtitle mengikuti yang disediakan server terpilih. Jika satu server gagal, coba server lain.</p>
+      </div>
+      <aside class="side">
+        <h3>Episode (${eps.length})</h3>
+        <div class="eps-grid">${eps.map((e) => `<a class="${e.episode_number === epNum ? 'playing' : ''}" href="#/anime/m/watch/${esc(id)}/${e.episode_number}">Eps ${e.episode_number}</a>`).join('')}</div>
+      </aside>
+    </div>`;
+  const tSel = $('#mirTrack');
+  if (tSel) tSel.addEventListener('change', () => {
+    mirWatch.track = tSel.value;
+    mirWatch.cand = mirCandidates(mirWatch.play, mirWatch.track);
+    mirWatch.sel = 0;
+    mirRenderPlayer();
+  });
+  mirRenderPlayer();
+}
+let mirHls = null;
+function mirStopHls() { if (mirHls) { try { mirHls.destroy(); } catch (e) {} mirHls = null; } }
+window.__animeStop = () => { mirStopHls(); };
+function mirRenderPlayer() {
+  const box = $('#mirPlayer'), srv = $('#mirSrvSlot');
+  if (!box || !mirWatch) return;
+  mirStopHls();
+  const cand = mirWatch.cand;
+  if (!cand.length) {
+    box.innerHTML = `<div class="err-box">Server embed tidak tersedia untuk episode ini dari Miruro. Gunakan tombol <b>“Buka di Miruro”</b> di bawah untuk menonton di situs resminya.</div>`;
+    if (srv) srv.innerHTML = '';
+    return;
+  }
+  const c = cand[Math.min(mirWatch.sel, cand.length - 1)];
+  box.innerHTML = `<div class="frame16x9">${c.type === 'embed'
+    ? `<iframe src="${esc(c.url)}" allowfullscreen allow="autoplay; fullscreen; encrypted-media; picture-in-picture" referrerpolicy="origin"></iframe>`
+    : `<video id="mirVideo" controls playsinline ${c.type === 'hls' ? 'crossorigin="anonymous"' : ''} ${c.type === 'video' ? `src="${esc(c.url)}"` : ''}></video>`}</div>`;
+  if (c.type === 'hls') {
+    const v = $('#mirVideo');
+    if (v && window.Hls && Hls.isSupported()) {
+      mirHls = new Hls({ enableWorker: true });
+      mirHls.loadSource(c.url);
+      mirHls.attachMedia(v);
+      mirHls.on(Hls.Events.MANIFEST_PARSED, () => v.play().catch(() => {}));
+    } else if (v) { v.src = c.url; v.play().catch(() => {}); }
+    if (v && c.subs && c.subs.length) mirAttachSubs(v, c);
+  }
+  if (srv) srv.innerHTML = `<div class="srvbar"><span class="lab">Server</span>${cand.map((x, i) => `<button class="chip ${i === mirWatch.sel ? 'on' : ''}" data-srv="${i}">${esc(x.label)}</button>`).join('')}</div>`;
+  srv && srv.querySelectorAll('[data-srv]').forEach((b) => b.addEventListener('click', () => { mirWatch.sel = +b.dataset.srv; mirRenderPlayer(); }));
+}
+
+async function mirAttachSubs(v, cand) {
+  const seen = new Set();
+  const subs = [];
+  for (const s of cand.subs || []) {
+    const lang = (s.language || s.label || '').toLowerCase();
+    if (!lang || seen.has(lang) || !s.file) continue;
+    seen.add(lang); subs.push(s);
+  }
+  for (const s of subs.slice(0, 12)) {
+    try {
+      const r = await fetch(mirFileProxy(s.file, cand.origin));
+      if (!r.ok) continue;
+      const txt = await r.text();
+      if (!txt.includes('-->')) continue;
+      const url = URL.createObjectURL(new Blob([txt], { type: 'text/vtt' }));
+      const track = document.createElement('track');
+      track.kind = 'subtitles'; track.label = s.label || s.language; track.srclang = (s.language || 'en').slice(0, 2); track.src = url;
+      if (s.default) track.default = true;
+      v.appendChild(track);
+    } catch (e) { /* subtitle per bahasa boleh gagal diam-diam */ }
+  }
+  setTimeout(() => { const tt = v.textTracks; for (let i = 0; i < tt.length; i++) { if (tt[i].mode === 'disabled' && i === 0) tt[i].mode = 'showing'; } }, 400);
+}
+
+/* ================= ANICHIN (Donghua) ================= */
+const ACH_BASE = 'https://anichinid.cafe';
+const ACH_XOR_KEY = 'fnasjfnasjdasj22323@$!#';
+const ACH_GENRES = ['action', 'adventure', 'comedy', 'cultivation', 'demons', 'drama', 'fantasy', 'friendship', 'game', 'gore', 'gourmet', 'harem', 'historical', 'horror', 'isekai', 'magic', 'martial-arts', 'mecha', 'military', 'mystery', 'mythology', 'psychological', 'reincarnation', 'romance', 'school', 'sci-fi', 'shounen', 'slice-of-life', 'space', 'sports', 'super-power', 'supernatural', 'suspense', 'team-sports', 'thriller', 'urban-fantasy'];
+const ACH_YEARS = Array.from({ length: 13 }, (_, i) => String(2026 - i));
+const achFetch = (path) => aoFetch(ACH_BASE + path, false);
+function achParseCards(html) {
+  const out = [];
+  const arts = String(html || '').match(/<article[\s\S]*?<\/article>/g) || [];
+  for (const a of arts) {
+    const link = a.match(/<a[^>]*href="\/seri\/([^"]+)"[^>]*>/);
+    if (!link) continue;
+    const tag = link[0];
+    const label = (tag.match(/aria-label="([^"]*)"/) || [])[1] || '';
+    const img = (a.match(/<img[^>]*src="([^"]+)"/) || [])[1] || '';
+    const title = label || ((a.match(/<img[^>]*alt="([^"]*)"/) || [])[1] || '').replace(/^Nonton\s+/i, '').replace(/\s+Sub Indo$/i, '');
+    out.push({ slug: link[1], title: title.trim(), poster: img });
+  }
+  return out;
+}
+function achHasNext(html, page) {
+  const nums = new Set();
+  for (const m of String(html || '').matchAll(/[?&]page=(\d+)/g)) nums.add(+m[1]);
+  return nums.has(page + 1);
+}
+function achCardHTML(c) {
+  return `<a class="card" href="#/anime/a/title/${esc(c.slug)}">
+    <div class="poster">${c.poster ? `<img loading="lazy" referrerpolicy="no-referrer" src="${esc(c.poster)}" alt="${esc(c.title)}">` : ''}</div>
+    <div class="name">${esc(c.title)}</div>
+    <div class="meta">Donghua · Sub Indo</div>
+  </a>`;
+}
+async function viewAnichinHome() {
+  setNav('anime');
+  document.title = 'Donghua (Anichin) — KharuiStream';
+  app.innerHTML = ptabsHTML('a', '', 'Cari donghua di Anichin… (mis. Battle Through the Heavens)')
+    + `<div class="sec-head"><h2>🐉 Donghua Populer</h2><a href="#/anime/a/browse">Jelajahi katalog →</a></div><div class="row-scroll" id="achPop">${skeletonCards(6)}</div>`
+    + `<div class="sec-head"><h2>🆕 Rilisan Terbaru</h2></div><div class="row-scroll" id="achNew">${skeletonCards(6)}</div>`;
+  bindASearch('a');
+  const fill = async (slot, path) => {
+    const el = $(slot); if (!el) return;
+    try {
+      const cards = achParseCards(await achFetch(path));
+      el.innerHTML = cards.length ? cards.map(achCardHTML).join('') : '<div class="empty" style="grid-column:1/-1">Tidak ada data.</div>';
+    } catch (e) { el.innerHTML = '<div class="empty" style="grid-column:1/-1">Gagal memuat rail ini.</div>'; }
+  };
+  fill('#achPop', '/donghua-populer');
+  fill('#achNew', '/series?page=1');
+}
+/* ---- Anichin: jelajah (genre ATAU tahun — situsnya tidak mendukung gabungan) ---- */
+const achBrowse = { mode: 'series', value: '', page: 1, loading: false, done: false };
+function achBrowsePath() {
+  if (achBrowse.mode === 'genre') return `/genre/${achBrowse.value}?page=${achBrowse.page}`;
+  if (achBrowse.mode === 'season') return `/season/${achBrowse.value}?page=${achBrowse.page}`;
+  return `/series?page=${achBrowse.page}`;
+}
+async function viewAnichinBrowse() {
+  setNav('anime');
+  document.title = 'Jelajahi Donghua — KharuiStream';
+  achBrowse.mode = 'series'; achBrowse.value = ''; achBrowse.page = 1; achBrowse.done = false;
+  app.innerHTML = ptabsHTML('a', '', 'Cari donghua di Anichin…')
+    + `<div class="filters">
+        <div class="frow"><span class="lab">Genre</span>
+          <button class="chip on" data-m="series" data-v="">Semua</button>
+          ${ACH_GENRES.map((g) => `<button class="chip" data-m="genre" data-v="${g}">${esc(g.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()))}</button>`).join('')}
+        </div>
+        <div class="frow"><span class="lab">Tahun</span>
+          ${ACH_YEARS.map((y) => `<button class="chip" data-m="season" data-v="${y}">${y}</button>`).join('')}
+        </div>
+        <p style="color:var(--dim2);font-size:12.5px;margin:8px 0 0">Filter genre dan tahun tidak bisa digabung (batasan situs sumbernya) — memilih salah satu akan menggantikan yang lain.</p>
+      </div>
+      <div class="grid" id="achGrid">${skeletonCards(12)}</div>
+      <div style="text-align:center;padding:24px"><button class="btn ghost" id="achMore">Muat Lebih Banyak</button></div>`;
+  bindASearch('a');
+  app.querySelectorAll('[data-m]').forEach((ch) => ch.addEventListener('click', () => {
+    achBrowse.mode = ch.dataset.m; achBrowse.value = ch.dataset.v; achBrowse.page = 1; achBrowse.done = false;
+    app.querySelectorAll('[data-m]').forEach((c) => c.classList.toggle('on', c === ch));
+    const g = $('#achGrid'); if (g) g.innerHTML = skeletonCards(12);
+    achLoadMore(true);
+  }));
+  $('#achMore').addEventListener('click', () => achLoadMore(false));
+  achLoadMore(true);
+}
+async function achLoadMore(first) {
+  if (achBrowse.loading || achBrowse.done) return;
+  achBrowse.loading = true;
+  const btn = $('#achMore'); if (btn) btn.textContent = 'Memuat…';
+  try {
+    if (!first) achBrowse.page++;
+    const html = await achFetch(achBrowsePath());
+    const cards = achParseCards(html);
+    const grid = $('#achGrid');
+    if (grid) {
+      if (first) grid.innerHTML = '';
+      if (!cards.length && first) grid.innerHTML = '<div class="empty" style="grid-column:1/-1"><b>Tidak ada judul</b>Coba filter lain.</div>';
+      else grid.insertAdjacentHTML('beforeend', cards.map(achCardHTML).join(''));
+    }
+    achBrowse.done = !achHasNext(html, achBrowse.page) || !cards.length;
+    if (!cards.length && !first) achBrowse.page--;
+  } catch (e) {
+    if (first) { const grid = $('#achGrid'); if (grid) grid.innerHTML = animeErr(); }
+    else { toast('Gagal memuat — coba lagi'); achBrowse.page--; }
+  }
+  achBrowse.loading = false;
+  if (btn) { btn.textContent = achBrowse.done ? '— Sudah semua —' : 'Muat Lebih Banyak'; btn.disabled = achBrowse.done; }
+}
+async function viewAnichinSearch(q) {
+  setNav('anime');
+  document.title = `Cari "${q}" (Anichin) — KharuiStream`;
+  app.innerHTML = ptabsHTML('a', q, 'Cari donghua di Anichin…')
+    + `<div class="sec-head"><h2>Hasil Anichin untuk “${esc(q)}”</h2><a href="#/anime/a/browse">Jelajahi katalog →</a></div>
+       <div class="grid" id="achGrid">${skeletonCards(10)}</div>`;
+  bindASearch('a');
+  try {
+    const cards = achParseCards(await achFetch('/search?q=' + encodeURIComponent(q)));
+    $('#achGrid').innerHTML = cards.length ? cards.map(achCardHTML).join('')
+      : '<div class="empty" style="grid-column:1/-1"><b>Tidak ditemukan</b>Coba kata kunci lain.</div>';
+  } catch (e) { $('#achGrid').innerHTML = animeErr(); }
+}
+/* ---- Anichin: detail + episode ---- */
+const achCache = new Map();   // slug -> parsed series
+function achParseSeries(html, slug) {
+  const meta = (prop) => { const m = String(html).match(new RegExp('<meta[^>]*property="og:' + prop + '"[^>]*content="([^"]*)"')) || String(html).match(new RegExp('<meta[^>]*content="([^"]*)"[^>]*property="og:' + prop + '"')); return m ? m[1] : ''; };
+  const h1 = String(html).match(/<h1[^>]*>([\s\S]*?)<\/h1>/);
+  let title = h1 ? stripHtml(h1[1]) : '';
+  if (!title) title = meta('title').split('|')[0].replace(/\.\.\.$/, '').replace(/^Nonton\s+/i, '').replace(/\s+Sub Indo$/i, '').trim();
+  const tax = (kind) => [...String(html).matchAll(new RegExp('href="/' + kind + '/([^"]+)"[^>]*>([^<]*)<', 'g'))].map((m) => ({ slug: m[1], label: stripHtml(m[2]) }));
+  const seenGenre = new Set(); const genres = tax('genre').filter((g) => !seenGenre.has(g.slug) && seenGenre.add(g.slug));
+  const seasons = tax('season'); const types = tax('type');
+  const byNum = new Map();
+  for (const m of String(html).matchAll(/href="\/post\/([^"]+)"/g)) {
+    const pslug = m[1];
+    const nm = pslug.match(/-(?:episode|ep)-(\d+)/i);
+    if (!nm) continue;
+    const num = +nm[1];
+    const prev = byNum.get(num);
+    if (!prev || pslug.length < prev.length) byNum.set(num, pslug);
+  }
+  const episodes = [...byNum.entries()].map(([num, pslug]) => ({ num, slug: pslug })).sort((a, b) => a.num - b.num);
+  return { slug, title: title || slug, poster: meta('image'), synopsis: meta('description') || '', genres, season: seasons[0] || null, type: types[0] || null, episodes };
+}
+async function achLoadSeries(slug) {
+  if (achCache.has(slug)) return achCache.get(slug);
+  const s = achParseSeries(await achFetch('/seri/' + slug), slug);
+  achCache.set(slug, s);
+  return s;
+}
+async function viewAnichinTitle(slug) {
+  setNav('anime');
+  document.title = 'Memuat donghua… — KharuiStream';
+  app.innerHTML = `<div class="skl" style="height:380px"></div>`;
+  let s;
+  try { s = await achLoadSeries(slug); } catch (e) { app.innerHTML = animeErr('Detail donghua gagal dimuat.'); return; }
+  document.title = `${s.title} — KharuiStream`;
+  app.innerHTML = `
+    <div class="crumb"><a href="#/anime/a">Donghua</a> › <a href="#/anime/a/browse">Anichin</a> › ${esc(s.title)}</div>
+    <section class="detail-hero">
+      ${s.poster ? `<img class="bg" referrerpolicy="no-referrer" src="${esc(s.poster)}" alt="">` : ''}
+      <div class="shade"></div>
+      <div class="detail-in">
+        <div class="poster2"><img referrerpolicy="no-referrer" src="${esc(s.poster)}" alt="${esc(s.title)}"></div>
+        <div class="info">
+          <h1>${esc(s.title)}</h1>
+          <div class="chips">
+            <span class="mchip" style="color:var(--gold);font-weight:700">Sub Indo</span>
+            ${s.type ? `<span class="mchip">${esc(s.type.label)}</span>` : ''}
+            ${s.season ? `<span class="mchip">${esc(s.season.label)}</span>` : ''}
+            ${s.episodes.length ? `<span class="mchip">${s.episodes.length} Episode</span>` : ''}
+            ${s.genres.map((g) => `<span class="mchip">${esc(g.label)}</span>`).join('')}
+          </div>
+          <p class="synopsis">${esc(s.synopsis || 'Belum ada sinopsis.')}</p>
+          ${s.episodes.length ? `<a class="btn" href="#/anime/a/watch/${esc(s.slug)}/${s.episodes[0].num}">▶ Putar Episode ${s.episodes[0].num}</a>` : '<div class="err-box">Episode belum tersedia.</div>'}
+        </div>
+      </div>
+    </section>
+    ${s.episodes.length ? `<div class="sec-head"><h2>Daftar Episode (${s.episodes.length})</h2></div>
+    <div class="eps-grid">${s.episodes.map((e) => `<a href="#/anime/a/watch/${esc(s.slug)}/${e.num}">Episode ${e.num}</a>`).join('')}</div>` : ''}`;
+}
+/* ---- Anichin: tonton ---- */
+function achDecodeServer(v) {
+  try {
+    const bin = atob(v);
+    let out = '';
+    for (let i = 0; i < bin.length; i++) out += String.fromCharCode(bin.charCodeAt(i) ^ ACH_XOR_KEY.charCodeAt(i % ACH_XOR_KEY.length));
+    const m = out.match(/SRC="([^"]+)"/i);
+    return (m ? m[1] : out).trim();
+  } catch (e) { return null; }
+}
+function achParseServers(html) {
+  const seg = (String(html).match(/<select[^>]*id="server-select"[^>]*>([\s\S]*?)<\/select>/) || [])[1] || '';
+  const out = [];
+  for (const m of seg.matchAll(/<option value="([^"]*)">([^<]*)<\/option>/g)) {
+    if (!m[1]) continue;
+    const url = achDecodeServer(m[1]);
+    if (!url || !/^https?:\/\//i.test(url)) continue;
+    let host = ''; try { host = new URL(url).hostname; } catch (e) {}
+    out.push({ label: stripHtml(m[2]) || host, url, host });
+  }
+  // pemutar milik situs (anichin.bio) paling tidak andal — taruh paling akhir
+  out.sort((a, b) => (a.host.includes('anichin.bio') ? 1 : 0) - (b.host.includes('anichin.bio') ? 1 : 0));
+  return out;
+}
+let achWatch = null;
+async function viewAnichinWatch(slug, epNum) {
+  setNav('anime');
+  document.title = 'Memuat episode… — KharuiStream';
+  app.innerHTML = `<div class="skl" style="height:420px"></div>`;
+  let s, servers;
+  try {
+    s = await achLoadSeries(slug);
+    const ep = s.episodes.find((e) => e.num === epNum) || s.episodes[0];
+    if (!ep) { app.innerHTML = '<div class="empty"><b>Episode tidak ditemukan</b></div>'; return; }
+    epNum = ep.num;
+    servers = achParseServers(await achFetch('/post/' + ep.slug));
+  } catch (e) { app.innerHTML = animeErr('Data putar gagal dimuat dari Anichin.'); return; }
+  achWatch = { servers, sel: 0 };
+  const idx = s.episodes.findIndex((e) => e.num === epNum);
+  const prev = idx > 0 ? s.episodes[idx - 1] : null, next = idx >= 0 && idx < s.episodes.length - 1 ? s.episodes[idx + 1] : null;
+  document.title = `${s.title} — Episode ${epNum} — KharuiStream`;
+  app.innerHTML = `
+    <div class="crumb"><a href="#/anime/a">Donghua</a> › <a href="#/anime/a/title/${esc(s.slug)}">${esc(s.title)}</a> › Episode ${epNum}</div>
+    <div class="watch-wrap">
+      <div>
+        <div id="achPlayer"></div>
+        <div id="achSrvSlot"></div>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:14px">
+          <h2 style="margin:0;font-size:20px">${esc(s.title)} — Episode ${epNum}</h2>
+          <span class="badge full">✓ Sub Indo</span>
+        </div>
+        <div class="p-controls">
+          ${prev ? `<a class="btn ghost sm" href="#/anime/a/watch/${esc(s.slug)}/${prev.num}">⏮ Episode ${prev.num}</a>` : ''}
+          ${next ? `<a class="btn ghost sm" href="#/anime/a/watch/${esc(s.slug)}/${next.num}">Episode ${next.num} ⏭</a>` : ''}
+        </div>
+        <p style="color:var(--dim);max-width:80ch">Video diputar lewat pemutar embed dari server yang dipilih (sumber Anichin). Jika satu server gagal atau lambat, coba server lain.</p>
+      </div>
+      <aside class="side">
+        <h3>Episode (${s.episodes.length})</h3>
+        <div class="eps-grid">${s.episodes.map((e) => `<a class="${e.num === epNum ? 'playing' : ''}" href="#/anime/a/watch/${esc(s.slug)}/${e.num}">Eps ${e.num}</a>`).join('')}</div>
+      </aside>
+    </div>`;
+  achRenderPlayer();
+}
+function achRenderPlayer() {
+  const box = $('#achPlayer'), srv = $('#achSrvSlot');
+  if (!box || !achWatch) return;
+  const list = achWatch.servers;
+  if (!list.length) {
+    box.innerHTML = `<div class="err-box">Tidak ada server video yang bisa dibaca untuk episode ini.</div>`;
+    if (srv) srv.innerHTML = '';
+    return;
+  }
+  const c = list[Math.min(achWatch.sel, list.length - 1)];
+  const isMp4 = /\.mp4($|\?)/i.test(c.url);
+  box.innerHTML = `<div class="frame16x9">${isMp4
+    ? `<video controls playsinline src="${esc(c.url)}"></video>`
+    : `<iframe src="${esc(c.url)}" allowfullscreen allow="autoplay; fullscreen; encrypted-media; picture-in-picture" referrerpolicy="origin"></iframe>`}</div>`;
+  if (srv) srv.innerHTML = `<div class="srvbar"><span class="lab">Server</span>${list.map((x, i) => `<button class="chip ${i === achWatch.sel ? 'on' : ''}" data-srv="${i}">${esc(x.label)}</button>`).join('')}</div>`;
+  srv && srv.querySelectorAll('[data-srv]').forEach((b) => b.addEventListener('click', () => { achWatch.sel = +b.dataset.srv; achRenderPlayer(); }));
+}
+
+/* ---- router anime ---- */
+window.__animeRoute = (p) => {
+  const src = p[0] === 'a' ? 'a' : 'm';
+  if (p.length <= 1) return src === 'a' ? viewAnichinHome() : viewMiruroHome();
+  if (src === 'm') {
+    if (p[1] === 'browse') return viewMiruroBrowse();
+    if (p[1] === 'search') return viewMiruroSearch(decodeURIComponent(p.slice(2).join('/') || ''));
+    if (p[1] === 'title') return viewMiruroTitle(p[2]);
+    if (p[1] === 'watch') return viewMiruroWatch(p[2], parseInt(p[3] || '1', 10) || 1);
+  } else {
+    if (p[1] === 'browse') return viewAnichinBrowse();
+    if (p[1] === 'search') return viewAnichinSearch(decodeURIComponent(p.slice(2).join('/') || ''));
+    if (p[1] === 'title') return viewAnichinTitle(p[2]);
+    if (p[1] === 'watch') return viewAnichinWatch(p[2], parseInt(p[3] || '1', 10) || 1);
+  }
+  return src === 'a' ? viewAnichinHome() : viewMiruroHome();
+};
+/* boot langsung di rute anime (modul dimuat setelah router utama) */
+if ((location.hash || '').startsWith('#/anime')) router();
+})();
+
 </script>
 </body>
 </html>
