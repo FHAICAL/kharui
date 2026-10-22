@@ -158,7 +158,8 @@
       <a href="#/" data-nav="home">Beranda</a>
       <a href="#/browse/1" data-nav="g1">Film</a>
       <a href="#/browse/2" data-nav="g2">Serial TV</a>
-      <a href="#/anime/m" data-nav="anime">Anime</a>
+      <a href="#/anime/m" data-nav="animeM">🎌 Miruro</a>
+      <a href="#/anime/a" data-nav="animeA">🐉 Anichin</a>
     </nav>
     <div class="searchbox">
       <span class="ic">🔍</span>
@@ -578,6 +579,14 @@ async function viewHome() {
     }
     const row = $('#rowHot');
     if (row) row.innerHTML = items.length ? items.map((it) => cardHTML({ id: it.contentId, dt: it.category })).join('') : '<div class="empty" style="grid-column:1/-1">Belum ada data tren.</div>';
+    if (items.length < 3) {
+      // endpoint tren Loklok sering hanya mengembalikan 0-1 judul; lengkapi dari film populer
+      const g = GROUPS.get(1);
+      if (g) screenPage(g, { size: 12 }).then((m) => {
+        const r2 = $('#rowHot');
+        if (r2 && m.length) r2.innerHTML = m.map((i) => cardHTML({ id: i.id, dt: i.domainType })).join('');
+      }).catch(() => {});
+    }
   });
   const fill = async (slot, groupId) => {
     const g = GROUPS.get(groupId);
@@ -886,12 +895,27 @@ async function viewSearch(q) {
 function setNav(which) {
   document.querySelectorAll('nav.main a').forEach((a) => a.classList.toggle('on', a.dataset.nav === which));
 }
+/* Pemisahan sumber data: tiga katalog benar-benar terpisah (Loklok / Miruro / Anichin).
+   Pencarian header selalu bekerja di dalam sumber yang sedang dibuka. */
+let ksSource = 'loklok';
+const KS_PLACEHOLDERS = {
+  loklok: 'Cari judul film atau serial…',
+  miruro: 'Cari anime di Miruro…',
+  anichin: 'Cari donghua di Anichin…',
+};
+function setSource(s) {
+  ksSource = s;
+  const inp = $('#searchInput');
+  if (inp) inp.placeholder = KS_PLACEHOLDERS[s] || KS_PLACEHOLDERS.loklok;
+  if (s !== 'loklok') { const sb = $('#suggest'); if (sb) sb.classList.remove('open'); }
+}
 function router() {
   stopWatch();
   if (window.__animeStop) window.__animeStop();
   const hash = location.hash.replace(/^#/, '') || '/';
   const parts = hash.split('/').filter(Boolean);
   window.scrollTo(0, 0);
+  setSource(parts[0] === 'anime' ? (parts[1] === 'a' ? 'anichin' : 'miruro') : 'loklok');
   if (parts.length === 0) return viewHome();
   if (parts[0] === 'browse') return viewBrowse(parseInt(parts[1] || '1', 10) || 1);
   if (parts[0] === 'title') return viewTitle(parts[1], parts[2] ?? '1');
@@ -905,6 +929,7 @@ window.addEventListener('hashchange', router);
 const sInput = $('#searchInput'), sBox = $('#suggest');
 let sDebounce = null;
 function renderSuggest(q) {
+  if (ksSource !== 'loklok') { sBox.classList.remove('open'); return; }
   const hits = searchIndex(q).slice(0, 8);
   if (!q.trim()) { sBox.classList.remove('open'); return; }
   sBox.innerHTML = (hits.map((it) => `<a href="#/title/${it.id}/${it.dt}">
@@ -916,7 +941,13 @@ function renderSuggest(q) {
 }
 sInput.addEventListener('input', () => { clearTimeout(sDebounce); sDebounce = setTimeout(() => renderSuggest(sInput.value), 160); });
 sInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') { const q = sInput.value.trim(); if (q) { location.hash = '#/search/' + encodeURIComponent(q); sBox.classList.remove('open'); sInput.blur(); } }
+  if (e.key === 'Enter') {
+    const q = sInput.value.trim(); if (!q) return;
+    if (ksSource === 'miruro') location.hash = '#/anime/m/search/' + encodeURIComponent(q);
+    else if (ksSource === 'anichin') location.hash = '#/anime/a/search/' + encodeURIComponent(q);
+    else location.hash = '#/search/' + encodeURIComponent(q);
+    sBox.classList.remove('open'); sInput.blur();
+  }
 });
 document.addEventListener('click', (e) => { if (!e.target.closest('.searchbox')) sBox.classList.remove('open'); });
 document.addEventListener('keydown', (e) => { if (e.key === '/' && document.activeElement !== sInput && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) { e.preventDefault(); sInput.focus(); } });
@@ -1019,7 +1050,7 @@ function mirCardHTML(a) {
   </a>`;
 }
 async function viewMiruroHome() {
-  setNav('anime');
+  setNav('animeM');
   document.title = 'Anime (Miruro) — KharuiStream';
   app.innerHTML = ptabsHTML('m', '', 'Cari anime di Miruro… (mis. Naruto, One Piece)')
     + `<div class="sec-head"><h2>🔥 Trending — Sedang Tayang</h2><a href="#/anime/m/browse">Jelajahi katalog →</a></div><div class="row-scroll" id="mirTrend">${skeletonCards(6)}</div>`
@@ -1056,7 +1087,7 @@ function mirBrowseParams(withCursor) {
   return '/api/v1/anime?' + p.toString();
 }
 async function viewMiruroBrowse() {
-  setNav('anime');
+  setNav('animeM');
   document.title = 'Jelajahi Anime — KharuiStream';
   mirBrowse.genre = ''; mirBrowse.format = ''; mirBrowse.status = ''; mirBrowse.year = ''; mirBrowse.sort = '-popularity'; mirBrowse.cursor = null; mirBrowse.done = false;
   const years = ['', ...Array.from({ length: 37 }, (_, i) => String(2026 - i))];
@@ -1117,7 +1148,7 @@ async function mirLoadMore(first) {
   if (btn) { btn.textContent = mirBrowse.done ? '— Sudah semua —' : 'Muat Lebih Banyak'; btn.disabled = mirBrowse.done; }
 }
 async function viewMiruroSearch(q) {
-  setNav('anime');
+  setNav('animeM');
   document.title = `Cari "${q}" (Miruro) — KharuiStream`;
   app.innerHTML = ptabsHTML('m', q, 'Cari anime di Miruro…')
     + `<div class="sec-head"><h2>Hasil Miruro untuk “${esc(q)}”</h2><a href="#/anime/m/browse">Jelajahi katalog →</a></div>
@@ -1157,7 +1188,7 @@ function mirEpGridHTML(id, eps, rangeIdx) {
   <div class="eps-grid">${slice.map((ep) => `<a href="#/anime/m/watch/${esc(id)}/${ep.episode_number}">Eps ${ep.episode_number}<small>${esc(ep.title || '')}</small></a>`).join('')}</div>`;
 }
 async function viewMiruroTitle(id) {
-  setNav('anime');
+  setNav('animeM');
   document.title = 'Memuat anime… — KharuiStream';
   app.innerHTML = `<div class="skl" style="height:380px"></div>`;
   let pack;
@@ -1255,7 +1286,7 @@ function mirCandidates(play, track) {
 }
 let mirWatch = null;
 async function viewMiruroWatch(id, epNum) {
-  setNav('anime');
+  setNav('animeM');
   document.title = 'Memuat episode… — KharuiStream';
   app.innerHTML = `<div class="skl" style="height:420px"></div>`;
   let pack, play;
@@ -1396,7 +1427,7 @@ function achCardHTML(c) {
   </a>`;
 }
 async function viewAnichinHome() {
-  setNav('anime');
+  setNav('animeA');
   document.title = 'Donghua (Anichin) — KharuiStream';
   app.innerHTML = ptabsHTML('a', '', 'Cari donghua di Anichin… (mis. Battle Through the Heavens)')
     + `<div class="sec-head"><h2>🐉 Donghua Populer</h2><a href="#/anime/a/browse">Jelajahi katalog →</a></div><div class="row-scroll" id="achPop">${skeletonCards(6)}</div>`
@@ -1420,7 +1451,7 @@ function achBrowsePath() {
   return `/series?page=${achBrowse.page}`;
 }
 async function viewAnichinBrowse() {
-  setNav('anime');
+  setNav('animeA');
   document.title = 'Jelajahi Donghua — KharuiStream';
   achBrowse.mode = 'series'; achBrowse.value = ''; achBrowse.page = 1; achBrowse.done = false;
   app.innerHTML = ptabsHTML('a', '', 'Cari donghua di Anichin…')
@@ -1470,7 +1501,7 @@ async function achLoadMore(first) {
   if (btn) { btn.textContent = achBrowse.done ? '— Sudah semua —' : 'Muat Lebih Banyak'; btn.disabled = achBrowse.done; }
 }
 async function viewAnichinSearch(q) {
-  setNav('anime');
+  setNav('animeA');
   document.title = `Cari "${q}" (Anichin) — KharuiStream`;
   app.innerHTML = ptabsHTML('a', q, 'Cari donghua di Anichin…')
     + `<div class="sec-head"><h2>Hasil Anichin untuk “${esc(q)}”</h2><a href="#/anime/a/browse">Jelajahi katalog →</a></div>
@@ -1511,7 +1542,7 @@ async function achLoadSeries(slug) {
   return s;
 }
 async function viewAnichinTitle(slug) {
-  setNav('anime');
+  setNav('animeA');
   document.title = 'Memuat donghua… — KharuiStream';
   app.innerHTML = `<div class="skl" style="height:380px"></div>`;
   let s;
@@ -1567,7 +1598,7 @@ function achParseServers(html) {
 }
 let achWatch = null;
 async function viewAnichinWatch(slug, epNum) {
-  setNav('anime');
+  setNav('animeA');
   document.title = 'Memuat episode… — KharuiStream';
   app.innerHTML = `<div class="skl" style="height:420px"></div>`;
   let s, servers;
